@@ -1,0 +1,32 @@
+{
+  "nombre": "Banco Continental",
+  "banco": "Continental",
+  "ancho_mm": 175,
+  "alto_mm": 76,
+  "campos": {
+    "fecha": {
+      "x": 102,
+      "y": 48,
+      "tamaño": 11,
+      "alineacion": "izquierda"
+    },
+    "beneficiario": {
+      "x": 25,
+      "y": 35,
+      "tamaño": 11,
+      "alineacion": "izquierda"
+    },
+    "importe_num": {
+      "x": 167,
+      "y": 60,
+      "tamaño": 12,
+      "alineacion": "derecha"
+    },
+    "importe_letras": {
+      "x": 25,
+      "y": 29,
+      "tamaño": 10,
+      "alineacion": "izquierda"
+    }
+  }
+}
