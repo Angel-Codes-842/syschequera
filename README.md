@@ -295,7 +295,7 @@ Expected output:
 Este proyecto está disponible bajo licencia MIT.
 
 ## Autor
-
+Angel Gómez
 Desarrollo: 2026
 
 ---
