@@ -91,11 +91,11 @@ class GestionadorCheques:
             cursor = conn.cursor()
             
             cursor.execute("""
-                INSERT INTO cheques (serie, numero, fecha_emision, beneficiario,
-                                    importe_num, importe_letras, concepto, plantilla)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """, (serie, numero, fecha_emision, beneficiario, importe_num,
-                  importe_letras, concepto, plantilla))
+                INSERT INTO cheques (serie, numero, fecha_emision, beneficiario, 
+                                     importe_num, importe_letras, concepto, estado)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 'activo')
+            """, (serie, numero, fecha_emision, beneficiario, 
+                  importe_num, importe_letras, concepto))
             
             conn.commit()
             conn.close()
@@ -266,6 +266,63 @@ class GestionadorCheques:
         conn.close()
         
         return filas_afectadas > 0
+    
+    def anular_cheque(self, cheque_id: int, motivo: str = "") -> bool:
+        """
+        Anula un cheque (cambia estado a 'anulado').
+        
+        Args:
+            cheque_id: ID del cheque a anular
+            motivo: Motivo de la anulación (opcional)
+        
+        Returns:
+            True si se anuló, False si no existe
+        """
+        conn = self._conectar()
+        cursor = conn.cursor()
+        
+        cursor.execute(
+            "UPDATE cheques SET estado = 'anulado' WHERE id = ?",
+            (cheque_id,)
+        )
+        conn.commit()
+        
+        filas_afectadas = cursor.rowcount
+        conn.close()
+        
+        if filas_afectadas > 0:
+            # Crear backup después de anular
+            self.gestor_backup.crear_backup()
+            return True
+        return False
+    
+    def reactivar_cheque(self, cheque_id: int) -> bool:
+        """
+        Reactiva un cheque anulado (cambia estado a 'activo').
+        
+        Args:
+            cheque_id: ID del cheque a reactivar
+        
+        Returns:
+            True si se reactivó, False si no existe
+        """
+        conn = self._conectar()
+        cursor = conn.cursor()
+        
+        cursor.execute(
+            "UPDATE cheques SET estado = 'activo' WHERE id = ?",
+            (cheque_id,)
+        )
+        conn.commit()
+        
+        filas_afectadas = cursor.rowcount
+        conn.close()
+        
+        if filas_afectadas > 0:
+            # Crear backup después de reactivar
+            self.gestor_backup.crear_backup()
+            return True
+        return False
     
     def obtener_estadisticas(self) -> Dict:
         """

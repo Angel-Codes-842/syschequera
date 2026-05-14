@@ -350,7 +350,7 @@ class AplicacionCheques:
         # Reducir height significativamente para dejar espacio abajo
         self.tree_historial = ttk.Treeview(
             frame_tabla,
-            columns=("id", "serie", "numero", "beneficiario", "importe", "fecha", "concepto"),
+            columns=("id", "serie", "numero", "beneficiario", "importe", "fecha", "concepto", "estado"),
             height=10,
             yscrollcommand=scrollbar_y.set,
             xscrollcommand=scrollbar_x.set
@@ -367,8 +367,9 @@ class AplicacionCheques:
         self.tree_historial.column("beneficiario", anchor=tk.W, width=200)
         self.tree_historial.column("importe", anchor=tk.E, width=120)
         self.tree_historial.column("fecha", anchor=tk.CENTER, width=80)
-        self.tree_historial.column("concepto", anchor=tk.W, width=300)
-        
+        self.tree_historial.column("concepto", anchor=tk.W, width=250)
+        self.tree_historial.column("estado", anchor=tk.CENTER, width=80)
+
         self.tree_historial.heading("#0", text="", anchor=tk.W)
         self.tree_historial.heading("id", text="ID")
         self.tree_historial.heading("serie", text="Serie")
@@ -377,6 +378,7 @@ class AplicacionCheques:
         self.tree_historial.heading("importe", text="Importe")
         self.tree_historial.heading("fecha", text="Fecha")
         self.tree_historial.heading("concepto", text="Concepto")
+        self.tree_historial.heading("estado", text="Estado")
         
         self.tree_historial.grid(row=0, column=0, sticky=tk.NSEW)
         scrollbar_y.grid(row=0, column=1, sticky=tk.NS)
@@ -398,15 +400,29 @@ class AplicacionCheques:
         btn_reimprimir.pack(side=tk.LEFT, padx=10)
         
         btn_vista_previa_historial = ttk.Button(
-            frame_acciones_historial, 
-            text="👁 Vista Previa", 
+            frame_acciones_historial,
+            text="👁 Vista Previa",
             command=self._vista_previa_seleccionado
         )
-        btn_vista_previa_historial.pack(side=tk.LEFT, padx=10)
-        
+        btn_vista_previa_historial.pack(side=tk.LEFT, padx=5)
+
+        btn_anular = ttk.Button(
+            frame_acciones_historial,
+            text="❌ Anular Cheque",
+            command=self._anular_cheque_seleccionado
+        )
+        btn_anular.pack(side=tk.LEFT, padx=5)
+
+        btn_reactivar = ttk.Button(
+            frame_acciones_historial,
+            text="✅ Reactivar",
+            command=self._reactivar_cheque_seleccionado
+        )
+        btn_reactivar.pack(side=tk.LEFT, padx=5)
+
         btn_abrir_pdf = ttk.Button(
-            frame_acciones_historial, 
-            text="📂 Abrir Carpeta PDFs", 
+            frame_acciones_historial,
+            text="📂 Abrir Carpeta PDFs",
             command=self._abrir_carpeta_pdfs
         )
         btn_abrir_pdf.pack(side=tk.RIGHT, padx=10)
@@ -746,6 +762,9 @@ class AplicacionCheques:
             except:
                 importe_formateado = cheque['importe_num']
 
+            # Obtener estado (default: activo)
+            estado = cheque.get("estado", "activo")
+
             self.tree_historial.insert(
                 "",
                 tk.END,
@@ -756,7 +775,8 @@ class AplicacionCheques:
                     cheque["beneficiario"],
                     importe_formateado,
                     cheque["fecha_emision"],
-                    cheque.get("concepto", "")
+                    cheque.get("concepto", ""),
+                    estado
                 )
             )
     
@@ -794,6 +814,9 @@ class AplicacionCheques:
             except:
                 importe_formateado = cheque['importe_num']
 
+            # Obtener estado (default: activo)
+            estado = cheque.get("estado", "activo")
+
             self.tree_historial.insert(
                 "",
                 tk.END,
@@ -804,7 +827,8 @@ class AplicacionCheques:
                     cheque["beneficiario"],
                     importe_formateado,
                     cheque["fecha_emision"],
-                    cheque.get("concepto", "")
+                    cheque.get("concepto", ""),
+                    estado
                 )
             )
     
@@ -897,13 +921,13 @@ class AplicacionCheques:
         if not cheque:
             messagebox.showwarning("Atención", "Selecciona un cheque en el historial")
             return
-            
+
         cheque_dict = dict(cheque)
         datos = self._preparar_datos_para_pdf(cheque_dict)
-        
+
         # Usar modo temporal para no duplicar archivos en PDFs/
         ruta_pdf = self.generador_pdf.generar_pdf(
-            datos, 
+            datos,
             nombre_plantilla=datos["plantilla"],
             es_temporal=True
         )
@@ -911,6 +935,60 @@ class AplicacionCheques:
             messagebox.showinfo("Éxito", "PDF de cheque abierto en vista previa")
         else:
             messagebox.showerror("Error", "No se pudo abrir la vista previa")
+
+    def _anular_cheque_seleccionado(self):
+        """Anula el cheque seleccionado en el historial."""
+        cheque = self._obtener_cheque_seleccionado()
+        if not cheque:
+            messagebox.showwarning("Atención", "Selecciona un cheque en el historial")
+            return
+
+        cheque_dict = dict(cheque)
+        estado_actual = cheque_dict.get("estado", "activo")
+
+        if estado_actual == "anulado":
+            messagebox.showwarning("Atención", "Este cheque ya está anulado")
+            return
+
+        # Confirmar anulación
+        if messagebox.askyesno(
+            "Confirmar Anulación",
+            f"¿Estás seguro de anular el cheque {cheque_dict['serie']}-{cheque_dict['numero']}?\n\n"
+            f"Beneficiario: {cheque_dict['beneficiario']}\n"
+            f"Importe: {cheque_dict['importe_num']:,}"
+        ):
+            if self.db.anular_cheque(cheque_dict["id"]):
+                messagebox.showinfo("Éxito", "Cheque anulado correctamente")
+                self._recargar_historial()
+            else:
+                messagebox.showerror("Error", "No se pudo anular el cheque")
+
+    def _reactivar_cheque_seleccionado(self):
+        """Reactiva el cheque seleccionado en el historial."""
+        cheque = self._obtener_cheque_seleccionado()
+        if not cheque:
+            messagebox.showwarning("Atención", "Selecciona un cheque en el historial")
+            return
+
+        cheque_dict = dict(cheque)
+        estado_actual = cheque_dict.get("estado", "activo")
+
+        if estado_actual == "activo":
+            messagebox.showwarning("Atención", "Este cheque ya está activo")
+            return
+
+        # Confirmar reactivación
+        if messagebox.askyesno(
+            "Confirmar Reactivación",
+            f"¿Estás seguro de reactivar el cheque {cheque_dict['serie']}-{cheque_dict['numero']}?\n\n"
+            f"Beneficiario: {cheque_dict['beneficiario']}\n"
+            f"Importe: {cheque_dict['importe_num']:,}"
+        ):
+            if self.db.reactivar_cheque(cheque_dict["id"]):
+                messagebox.showinfo("Éxito", "Cheque reactivado correctamente")
+                self._recargar_historial()
+            else:
+                messagebox.showerror("Error", "No se pudo reactivar el cheque")
     
     def _ventana_calibracion(self):
         """Abre ventana interactiva de calibración de impresión."""

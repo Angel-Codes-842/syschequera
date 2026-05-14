@@ -130,17 +130,17 @@ class GestorMigraciones:
             conn.commit()
             conn.close()
             
-            print(f"✓ Migración {version} aplicada: {nombre}")
+            print(f"[OK] Migracion {version} aplicada: {nombre}")
             return True
-            
+
         except sqlite3.OperationalError as e:
-            print(f"✗ Error de base de datos en migración {ruta_sql}: {e}")
+            print(f"[ERROR] Error de base de datos en migracion {ruta_sql}: {e}")
             return False
         except (OSError, IOError) as e:
-            print(f"✗ Error al leer archivo de migración {ruta_sql}: {e}")
+            print(f"[ERROR] Error al leer archivo de migracion {ruta_sql}: {e}")
             return False
         except Exception as e:
-            print(f"✗ Error inesperado al aplicar migración {ruta_sql}: {e}")
+            print(f"[ERROR] Error inesperado al aplicar migracion {ruta_sql}: {e}")
             return False
     
     def migrar(self) -> bool:
@@ -153,16 +153,16 @@ class GestorMigraciones:
         pendientes = self.listar_migraciones_pendientes()
         
         if not pendientes:
-            print("✓ Base de datos está actualizada (sin migraciones pendientes)")
+            print("[OK] Base de datos esta actualizada (sin migraciones pendientes)")
             return True
-        
-        print(f"Aplicando {len(pendientes)} migración(es) pendiente(s)...")
-        
+
+        print(f"Aplicando {len(pendientes)} migracion(es) pendiente(s)...")
+
         for migracion in pendientes:
             if not self.aplicar_migracion(migracion["ruta"]):
                 return False
-        
-        print("✓ Todas las migraciones aplicadas correctamente")
+
+        print("[OK] Todas las migraciones aplicadas correctamente")
         return True
     
     def crear_migracion(self, version: int, descripcion: str, sql: str):
@@ -178,11 +178,11 @@ class GestorMigraciones:
         ruta = self.ruta_migraciones / nombre_archivo
         
         with open(ruta, 'w', encoding='utf-8') as f:
-            f.write(f"-- Migración {version}: {descripcion}\n")
-            f.write(f"-- Generada automáticamente\n\n")
+            f.write(f"-- Migracion {version}: {descripcion}\n")
+            f.write(f"-- Generada automaticamente\n\n")
             f.write(sql)
-        
-        print(f"✓ Migración creada: {ruta}")
+
+        print(f"[OK] Migracion creada: {ruta}")
 
 
 # Migraciones iniciales del sistema
@@ -204,6 +204,16 @@ CREATE INDEX IF NOT EXISTS idx_fecha_emision ON cheques(fecha_emision);
 CREATE INDEX IF NOT EXISTS idx_beneficiario ON cheques(beneficiario);
 """
 
+MIGRACION_002 = """
+-- Migración 002: Agregar campo de estado para anulación de cheques
+
+-- Agregar columna estado (default: 'activo')
+ALTER TABLE cheques ADD COLUMN estado TEXT DEFAULT 'activo';
+
+-- Índice en estado para filtrar cheques activos/anulados
+CREATE INDEX IF NOT EXISTS idx_estado ON cheques(estado);
+"""
+
 
 def inicializar_migraciones(ruta_bd: str):
     """
@@ -214,12 +224,17 @@ def inicializar_migraciones(ruta_bd: str):
     """
     gestor = GestorMigraciones(ruta_bd)
     
-    # Crear migración inicial si no existe
-    ruta_migracion = gestor.ruta_migraciones / "001_indices_rendimiento.sql"
-    if not ruta_migracion.exists():
+    # Crear migración 001 si no existe
+    ruta_migracion_001 = gestor.ruta_migraciones / "001_indices_rendimiento.sql"
+    if not ruta_migracion_001.exists():
         gestor.crear_migracion(1, "indices_rendimiento", MIGRACION_001)
     
-    print("Migraciones inicializadas")
+    # Crear migración 002 si no existe
+    ruta_migracion_002 = gestor.ruta_migraciones / "002_estado_anulacion.sql"
+    if not ruta_migracion_002.exists():
+        gestor.crear_migracion(2, "estado_anulacion", MIGRACION_002)
+    
+    print("[OK] Migraciones inicializadas")
 
 
 if __name__ == "__main__":
