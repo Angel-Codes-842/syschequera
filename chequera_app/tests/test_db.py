@@ -55,11 +55,10 @@ class TestGestionadorCheques(unittest.TestCase):
     
     def test_creacion_tabla(self):
         """Test que la tabla se crea correctamente."""
-        conn = self.gestor._conectar()
-        cursor = conn.cursor()
-        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='cheques'")
-        tabla_existe = cursor.fetchone() is not None
-        conn.close()
+        with self.gestor._conectar() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='cheques'")
+            tabla_existe = cursor.fetchone() is not None
         self.assertTrue(tabla_existe)
     
     def test_insertar_cheque(self):

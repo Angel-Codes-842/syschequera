@@ -10,19 +10,19 @@ from datetime import datetime
 from typing import Dict, Optional
 from config import obtener_config
 import subprocess
-import sys
 
-# Intentar importar ReportLab, si no está, sugerir instalación
+# Intentar importar ReportLab
 try:
     from reportlab.pdfgen import canvas
     from reportlab.lib.units import mm
     from reportlab.lib.pagesizes import A4, landscape, portrait
     from reportlab.pdfbase import pdfmetrics
     from reportlab.pdfbase.ttfonts import TTFont
+    TIENE_REPORTLAB = True
 except ImportError:
+    TIENE_REPORTLAB = False
     print("ERROR: Se requiere instalar ReportLab")
     print("Ejecuta: pip install reportlab")
-    sys.exit(1)
 
 
 class GeneradorPDF:
@@ -35,6 +35,9 @@ class GeneradorPDF:
         Args:
             ruta_config: Ruta del archivo config.json (default: usa configuración centralizada)
         """
+        if not TIENE_REPORTLAB:
+            raise ImportError("ReportLab no está instalado. Ejecuta: pip install reportlab")
+        
         # Usar configuración centralizada
         self.config_mgr = obtener_config(ruta_config, str(Path(__file__).parent))
         self.config = self.config_mgr.a_dict()
@@ -53,13 +56,34 @@ class GeneradorPDF:
         self._registrar_fuentes()
     
     def _registrar_fuentes(self):
-        """Registra fuentes personaliza das (si existen)."""
-        try:
-            # Intentar usar Helvetica (fuente estándar disponible)
-            # ReportLab incluye fuentes estándar por defecto
-            pass
-        except (OSError, IOError) as e:
-            print(f"Advertencia al registrar fuentes: {e}")
+        """Registra una fuente TTF con soporte para Ñ y acentos."""
+        self._fuente_actual = "Helvetica"
+        rutas_fuente = []
+        if os.name == "nt":
+            windir = os.environ.get("WINDIR", "C:\\Windows")
+            rutas_fuente = [
+                os.path.join(windir, "Fonts", "arial.ttf"),
+                os.path.join(windir, "Fonts", "ARIAL.TTF"),
+            ]
+        elif sys.platform == "darwin":
+            rutas_fuente = [
+                "/Library/Fonts/Arial.ttf",
+                "/System/Library/Fonts/Supplemental/Arial.ttf",
+            ]
+        else:
+            rutas_fuente = [
+                "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+                "/usr/share/fonts/TTF/DejaVuSans.ttf",
+                "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+            ]
+        for ruta in rutas_fuente:
+            if os.path.exists(ruta):
+                try:
+                    pdfmetrics.registerFont(TTFont("ChequeFont", ruta))
+                    self._fuente_actual = "ChequeFont"
+                    return
+                except Exception:
+                    continue
     
     def cargar_plantilla(self, nombre_plantilla: str) -> Optional[Dict]:
         """
@@ -107,7 +131,7 @@ class GeneradorPDF:
         """
         # Determinar plantilla
         if not nombre_plantilla:
-            nombre_plantilla = self.config.get("plantilla_actual", "Continental")
+            nombre_plantilla = self.config.get("plantilla_actual", "BNF")
         
         plantilla = self.cargar_plantilla(nombre_plantilla)
         if not plantilla:
@@ -128,24 +152,41 @@ class GeneradorPDF:
         Path(archivo_salida).parent.mkdir(parents=True, exist_ok=True)
         
         try:
-            # Usar tamaño A4 estándar (210 x 297 mm)
-            # Esto soluciona problemas de orientación en la mayoría de las impresoras
-            ancho_a4, alto_a4 = A4  # En puntos (1 mm = 2.834 pts)
+            # Obtener configuración de rotación
+            rotar_90 = self.config.get("rotar_90", False)
             
-            c = canvas.Canvas(archivo_salida, pagesize=A4)
-            
-            # El cheque se posicionará en la parte SUPERIOR de la hoja A4
+            if rotar_90:
+                # Modo vertical (Portrait): El cheque se imprime rotado 90 grados
+                ancho_pag, alto_pag = portrait(A4)
+                c = canvas.Canvas(archivo_salida, pagesize=portrait(A4))
+                
+                # Rotar y posicionar en la esquina superior izquierda
+                # Trasladamos al tope de la hoja y rotamos -90
+                c.translate(0, alto_pag)
+                c.rotate(-90)
+                
+                # En este sistema:
+                # El nuevo eje X va hacia ABAJO (longitud del cheque)
+                # El nuevo eje Y va hacia la DERECHA (altura del cheque)
+                # El "alto virtual" para los cálculos de Y de la plantilla es el ancho del papel
+                alto_virtual = ancho_pag # 210mm
+            else:
+                # Modo estándar (Landscape)
+                ancho_pag, alto_pag = landscape(A4)
+                c = canvas.Canvas(archivo_salida, pagesize=landscape(A4))
+                alto_virtual = alto_pag
+
             # Altura del cheque según plantilla
             alto_cheque_mm = plantilla.get("alto_mm", 76)
             
             # Convertir mm a puntos para el desplazamiento vertical
             # ReportLab usa (0,0) en la esquina inferior izquierda.
-            # Para imprimir en el tope, el offset Y base es: Altura_A4 - Altura_Cheque
-            offset_y_base_pts = alto_a4 - (alto_cheque_mm * mm)
+            # Para imprimir en el tope, el offset Y base es: Altura_Virtual - Altura_Cheque
+            offset_y_base_pts = alto_virtual - (alto_cheque_mm * mm)
             
             # Configurar fuente
             tamaño_fuente = self.config.get("tamaño_fuente_default", 11)
-            c.setFont("Helvetica", tamaño_fuente)
+            c.setFont(self._fuente_actual, tamaño_fuente)
             
             # Procesar cada campo
             for nombre_campo, config_campo in plantilla["campos"].items():
@@ -155,15 +196,13 @@ class GeneradorPDF:
                     continue
                 
                 # Aplicar coordenadas relativas al cheque + offset global
-                # X se mantiene igual (desde la izquierda)
-                # Y se suma al offset base para que quede en el tope de la hoja
                 x = (config_campo["x"] + self.offset_x) * mm
                 y = offset_y_base_pts + ((config_campo["y"] + self.offset_y) * mm)
                 
                 tamaño = config_campo.get("tamaño", tamaño_fuente)
                 alineacion = config_campo.get("alineacion", "izquierda")
                 
-                c.setFont("Helvetica", tamaño)
+                c.setFont(self._fuente_actual, tamaño)
                 
                 # Posicionar texto según alineación
                 if alineacion == "derecha":
@@ -248,7 +287,7 @@ class GeneradorPDF:
                     resultado = subprocess.run(cmd, capture_output=True, text=True, shell=True)
                     if resultado.returncode == 0:
                         impresoras = [p.strip() for p in resultado.stdout.splitlines() if p.strip()]
-                except:
+                except Exception:
                     pass
         
         return sorted(impresoras) if impresoras else ["Impresora Predeterminada"]
@@ -285,9 +324,7 @@ class GeneradorPDF:
                     return True
                 except (OSError, AttributeError) as e:
                     print(f"Error en impresión nativa: {e}")
-                    # Fallback final: abrir el diálogo estándar de Windows
-                    os.startfile(ruta_pdf, "print")
-                    return True
+                    return False
             
             elif sys.platform == "darwin" or sys.platform.startswith("linux"):
                 comando = ["lp"]
@@ -299,13 +336,6 @@ class GeneradorPDF:
         
         except (OSError, subprocess.SubprocessError) as e:
             print(f"ERROR al imprimir: {e}")
-            # Fallback final: intentar abrir con el comando print de Windows
-            try:
-                if sys.platform == "win32":
-                    os.startfile(ruta_pdf, "print")
-                    return True
-            except:
-                pass
             return False
 
 

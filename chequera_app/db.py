@@ -4,6 +4,7 @@ Módulo de gestión de base de datos SQLite para historial de cheques.
 
 import sqlite3
 import os
+from contextlib import contextmanager
 from datetime import datetime
 from typing import List, Dict, Optional, Tuple
 from backup import GestorBackup
@@ -28,11 +29,15 @@ class GestionadorCheques:
         self.gestor_migraciones = GestorMigraciones(ruta_bd)
         self.gestor_migraciones.migrar()
     
+    @contextmanager
     def _conectar(self) -> sqlite3.Connection:
-        """Retorna una conexión a la base de datos."""
+        """Context manager: retorna una conexión que se cierra automáticamente."""
         conn = sqlite3.connect(self.ruta_bd)
-        conn.row_factory = sqlite3.Row  # Para acceder a columnas por nombre
-        return conn
+        conn.row_factory = sqlite3.Row
+        try:
+            yield conn
+        finally:
+            conn.close()
     
     def _agregar_columna_plantilla(self, cursor: sqlite3.Cursor) -> None:
         """Agrega la columna plantilla si no existe en la tabla cheques."""
@@ -43,29 +48,29 @@ class GestionadorCheques:
     
     def crear_tabla(self) -> None:
         """Crea la tabla de cheques si no existe."""
-        conn = self._conectar()
-        cursor = conn.cursor()
-        
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS cheques (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                serie TEXT NOT NULL,
-                numero INTEGER NOT NULL,
-                fecha_emision TEXT NOT NULL,
-                beneficiario TEXT NOT NULL,
-                importe_num INTEGER NOT NULL,
-                importe_letras TEXT NOT NULL,
-                concepto TEXT DEFAULT '',
-                plantilla TEXT DEFAULT '',
-                fecha_creacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE(serie, numero)
-            )
-        """)
-        
-        conn.commit()
-        self._agregar_columna_plantilla(cursor)
-        conn.commit()
-        conn.close()
+        with self._conectar() as conn:
+            cursor = conn.cursor()
+            
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS cheques (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    serie TEXT NOT NULL,
+                    numero INTEGER NOT NULL,
+                    fecha_emision TEXT NOT NULL,
+                    beneficiario TEXT NOT NULL,
+                    importe_num INTEGER NOT NULL,
+                    importe_letras TEXT NOT NULL,
+                    concepto TEXT DEFAULT '',
+                    plantilla TEXT DEFAULT '',
+                    estado TEXT DEFAULT 'activo',
+                    fecha_creacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(serie, numero)
+                )
+            """)
+            
+            conn.commit()
+            self._agregar_columna_plantilla(cursor)
+            conn.commit()
     
     def insertar_cheque(self, serie: str, numero: int, fecha_emision: str,
                        beneficiario: str, importe_num: int, importe_letras: str,
@@ -87,21 +92,17 @@ class GestionadorCheques:
             True si se insertó correctamente, False si hubo error (duplicado)
         """
         try:
-            conn = self._conectar()
-            cursor = conn.cursor()
+            with self._conectar() as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    INSERT INTO cheques (serie, numero, fecha_emision, beneficiario,
+                                         importe_num, importe_letras, concepto, plantilla, estado)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'activo')
+                """, (serie, numero, fecha_emision, beneficiario,
+                      importe_num, importe_letras, concepto, plantilla))
+                conn.commit()
             
-            cursor.execute("""
-                INSERT INTO cheques (serie, numero, fecha_emision, beneficiario, 
-                                     importe_num, importe_letras, concepto, estado)
-                VALUES (?, ?, ?, ?, ?, ?, ?, 'activo')
-            """, (serie, numero, fecha_emision, beneficiario, 
-                  importe_num, importe_letras, concepto))
-            
-            conn.commit()
-            conn.close()
-            
-            # Crear backup automático después de insertar
-            self.gestor_backup.crear_backup()
+            self.gestor_backup.crear_backup(interval=120)
             
             return True
         
@@ -126,13 +127,11 @@ class GestionadorCheques:
         Returns:
             True si ya existe, False si no existe
         """
-        conn = self._conectar()
-        cursor = conn.cursor()
-        
-        cursor.execute("SELECT COUNT(*) FROM cheques WHERE serie = ? AND numero = ?",
-                      (serie, numero))
-        resultado = cursor.fetchone()[0]
-        conn.close()
+        with self._conectar() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT COUNT(*) FROM cheques WHERE serie = ? AND numero = ?",
+                          (serie, numero))
+            resultado = cursor.fetchone()[0]
         
         return resultado > 0
     
@@ -146,12 +145,10 @@ class GestionadorCheques:
         Returns:
             Diccionario con los datos del cheque o None si no existe
         """
-        conn = self._conectar()
-        cursor = conn.cursor()
-        
-        cursor.execute("SELECT * FROM cheques WHERE id = ?", (cheque_id,))
-        fila = cursor.fetchone()
-        conn.close()
+        with self._conectar() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM cheques WHERE id = ?", (cheque_id,))
+            fila = cursor.fetchone()
         
         return dict(fila) if fila else None
     
@@ -165,18 +162,17 @@ class GestionadorCheques:
         Returns:
             Lista de diccionarios con los datos de cada cheque
         """
-        conn = self._conectar()
-        cursor = conn.cursor()
-        
-        if limite:
-            cursor.execute("""
-                SELECT * FROM cheques ORDER BY fecha_creacion DESC LIMIT ?
-            """, (limite,))
-        else:
-            cursor.execute("SELECT * FROM cheques ORDER BY fecha_creacion DESC")
-        
-        filas = cursor.fetchall()
-        conn.close()
+        with self._conectar() as conn:
+            cursor = conn.cursor()
+            
+            if limite:
+                cursor.execute("""
+                    SELECT * FROM cheques ORDER BY fecha_creacion DESC LIMIT ?
+                """, (limite,))
+            else:
+                cursor.execute("SELECT * FROM cheques ORDER BY fecha_creacion DESC")
+            
+            filas = cursor.fetchall()
         
         return [dict(fila) for fila in filas]
     
@@ -225,12 +221,12 @@ class GestionadorCheques:
             parametros.append(numero_hasta)
         
         if fecha_desde:
-            query += " AND substr(fecha_emision, 4, 2) || substr(fecha_emision, 1, 2) >= ?"
-            parametros.append(fecha_desde[3:5] + fecha_desde[0:2])
+            query += " AND substr(fecha_emision, 7, 4) || substr(fecha_emision, 4, 2) || substr(fecha_emision, 1, 2) >= ?"
+            parametros.append(fecha_desde[6:10] + fecha_desde[3:5] + fecha_desde[0:2])
         
         if fecha_hasta:
-            query += " AND substr(fecha_emision, 4, 2) || substr(fecha_emision, 1, 2) <= ?"
-            parametros.append(fecha_hasta[3:5] + fecha_hasta[0:2])
+            query += " AND substr(fecha_emision, 7, 4) || substr(fecha_emision, 4, 2) || substr(fecha_emision, 1, 2) <= ?"
+            parametros.append(fecha_hasta[6:10] + fecha_hasta[3:5] + fecha_hasta[0:2])
         
         if beneficiario:
             query += " AND beneficiario LIKE ?"
@@ -238,11 +234,10 @@ class GestionadorCheques:
         
         query += " ORDER BY fecha_creacion DESC"
         
-        conn = self._conectar()
-        cursor = conn.cursor()
-        cursor.execute(query, parametros)
-        filas = cursor.fetchall()
-        conn.close()
+        with self._conectar() as conn:
+            cursor = conn.cursor()
+            cursor.execute(query, parametros)
+            filas = cursor.fetchall()
         
         return [dict(fila) for fila in filas]
     
@@ -256,14 +251,11 @@ class GestionadorCheques:
         Returns:
             True si se eliminó, False si no existe
         """
-        conn = self._conectar()
-        cursor = conn.cursor()
-        
-        cursor.execute("DELETE FROM cheques WHERE id = ?", (cheque_id,))
-        conn.commit()
-        
-        filas_afectadas = cursor.rowcount
-        conn.close()
+        with self._conectar() as conn:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM cheques WHERE id = ?", (cheque_id,))
+            conn.commit()
+            filas_afectadas = cursor.rowcount
         
         return filas_afectadas > 0
     
@@ -278,21 +270,17 @@ class GestionadorCheques:
         Returns:
             True si se anuló, False si no existe
         """
-        conn = self._conectar()
-        cursor = conn.cursor()
-        
-        cursor.execute(
-            "UPDATE cheques SET estado = 'anulado' WHERE id = ?",
-            (cheque_id,)
-        )
-        conn.commit()
-        
-        filas_afectadas = cursor.rowcount
-        conn.close()
+        with self._conectar() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "UPDATE cheques SET estado = 'anulado' WHERE id = ?",
+                (cheque_id,)
+            )
+            conn.commit()
+            filas_afectadas = cursor.rowcount
         
         if filas_afectadas > 0:
-            # Crear backup después de anular
-            self.gestor_backup.crear_backup()
+            self.gestor_backup.crear_backup(interval=120)
             return True
         return False
     
@@ -306,21 +294,17 @@ class GestionadorCheques:
         Returns:
             True si se reactivó, False si no existe
         """
-        conn = self._conectar()
-        cursor = conn.cursor()
-        
-        cursor.execute(
-            "UPDATE cheques SET estado = 'activo' WHERE id = ?",
-            (cheque_id,)
-        )
-        conn.commit()
-        
-        filas_afectadas = cursor.rowcount
-        conn.close()
+        with self._conectar() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "UPDATE cheques SET estado = 'activo' WHERE id = ?",
+                (cheque_id,)
+            )
+            conn.commit()
+            filas_afectadas = cursor.rowcount
         
         if filas_afectadas > 0:
-            # Crear backup después de reactivar
-            self.gestor_backup.crear_backup()
+            self.gestor_backup.crear_backup(interval=120)
             return True
         return False
     
@@ -331,19 +315,16 @@ class GestionadorCheques:
         Returns:
             Diccionario con total de cheques, importe total, etc.
         """
-        conn = self._conectar()
-        cursor = conn.cursor()
-        
-        cursor.execute("SELECT COUNT(*) FROM cheques")
-        total_cheques = cursor.fetchone()[0]
-        
-        cursor.execute("SELECT SUM(importe_num) FROM cheques")
-        importe_total = cursor.fetchone()[0] or 0
-        
-        cursor.execute("SELECT DISTINCT serie FROM cheques")
-        series = [fila[0] for fila in cursor.fetchall()]
-        
-        conn.close()
+        with self._conectar() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT COUNT(*) FROM cheques")
+            total_cheques = cursor.fetchone()[0]
+            
+            cursor.execute("SELECT SUM(importe_num) FROM cheques")
+            importe_total = cursor.fetchone()[0] or 0
+            
+            cursor.execute("SELECT DISTINCT serie FROM cheques")
+            series = [fila[0] for fila in cursor.fetchall()]
         
         return {
             "total_cheques": total_cheques,

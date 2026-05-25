@@ -16,13 +16,13 @@ class Config:
     DEFAULT_CONFIG = {
         "offset_x": 0.0,
         "offset_y": 0.0,
-        "plantilla_actual": "Continental",
+        "plantilla_actual": "BNF",
         "ruta_plantillas": "plantillas",
         "ruta_pdfs": "PDFs",
         "ruta_bd": "cheques.db",
         "impresora_predeterminada": "Impresora Predeterminada",
-        "tamano_fuente": 10,
-        "rotar": False,
+        "tamaño_fuente_default": 11,
+        "rotar_90": False,
         "max_backups": 10,
         "validar_fecha_futura_dias": 30,
         "max_longitud_serie": 10,
@@ -158,11 +158,20 @@ class Config:
     @property
     def plantilla_actual(self) -> str:
         """Nombre de la plantilla actual."""
-        return self._config.get("plantilla_actual", "Continental")
+        return self._config.get("plantilla_actual", "BNF")
     
     @plantilla_actual.setter
     def plantilla_actual(self, valor: str):
         self._config["plantilla_actual"] = str(valor)
+    
+    @property
+    def rotar_90(self) -> bool:
+        """Si se debe rotar el PDF 90 grados (Alimentación vertical)."""
+        return self._config.get("rotar_90", False)
+    
+    @rotar_90.setter
+    def rotar_90(self, valor: bool):
+        self._config["rotar_90"] = bool(valor)
     
     @property
     def ruta_plantillas(self) -> Path:
@@ -191,20 +200,20 @@ class Config:
     @property
     def tamano_fuente(self) -> int:
         """Tamaño de fuente predeterminado."""
-        return self._config.get("tamano_fuente", 10)
+        return self._config.get("tamaño_fuente_default", 11)
     
     @tamano_fuente.setter
     def tamano_fuente(self, valor: int):
-        self._config["tamano_fuente"] = int(valor)
+        self._config["tamaño_fuente_default"] = int(valor)
     
     @property
     def rotar(self) -> bool:
         """Si se debe rotar el PDF."""
-        return self._config.get("rotar", False)
+        return self._config.get("rotar_90", False)
     
     @rotar.setter
     def rotar(self, valor: bool):
-        self._config["rotar"] = bool(valor)
+        self._config["rotar_90"] = bool(valor)
     
     @property
     def max_backups(self) -> int:

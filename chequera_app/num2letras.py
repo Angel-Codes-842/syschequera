@@ -21,6 +21,12 @@ def numero_a_letras(numero: int) -> str:
         1000000000 -> "UN MIL MILLONES DE GUARANÍES"
     """
     
+    if not isinstance(numero, int):
+        try:
+            numero = int(numero)
+        except (ValueError, TypeError):
+            raise ValueError(f"Tipo de número inválido: {type(numero).__name__}")
+    
     if numero == 0:
         return "CERO GUARANÍES"
     

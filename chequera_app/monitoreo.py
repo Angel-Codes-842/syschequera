@@ -38,10 +38,12 @@ class HealthCheck:
                 return False, f"Base de datos no existe: {self.ruta_bd}"
             
             conn = sqlite3.connect(self.ruta_bd)
-            cursor = conn.cursor()
-            cursor.execute("SELECT COUNT(*) FROM cheques")
-            cursor.fetchone()
-            conn.close()
+            try:
+                cursor = conn.cursor()
+                cursor.execute("SELECT COUNT(*) FROM cheques")
+                cursor.fetchone()
+            finally:
+                conn.close()
             
             return True, "Base de datos accesible"
             
@@ -76,32 +78,24 @@ class HealthCheck:
     
     def verificar_dependencias(self) -> Tuple[bool, str]:
         """
-        Verifica que las dependencias críticas estén instaladas.
+        Verifica que las dependencias externas estén instaladas.
         
         Returns:
             (estado, mensaje) donde estado es True si OK
         """
+        dependencias = [
+            ("reportlab", "reportlab"),
+            ("tkcalendar", "tkcalendar"),
+        ]
+        if sys.platform == "win32":
+            dependencias.append(("win32print", "pywin32"))
+        
         faltantes = []
-        
-        try:
-            import reportlab
-        except ImportError:
-            faltantes.append("reportlab")
-        
-        try:
-            from db import GestionadorCheques
-        except ImportError:
-            faltantes.append("db")
-        
-        try:
-            from impresion import GeneradorPDF
-        except ImportError:
-            faltantes.append("impresion")
-        
-        try:
-            from num2letras import numero_a_letras
-        except ImportError:
-            faltantes.append("num2letras")
+        for modulo, nombre in dependencias:
+            try:
+                __import__(modulo)
+            except ImportError:
+                faltantes.append(nombre)
         
         if faltantes:
             return False, f"Dependencias faltantes: {', '.join(faltantes)}"

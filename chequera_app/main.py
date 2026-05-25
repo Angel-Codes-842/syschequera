@@ -6,15 +6,17 @@ import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 from pathlib import Path
 from datetime import date
+import csv
 import sys
+import os
 from config import obtener_config
-from pathlib import Path
+from backup import GestorBackup
 
-# Importar módulos propios
 from db import GestionadorCheques
 from impresion import GeneradorPDF
 from num2letras import numero_a_letras
 from calibracion import VentanaCalibracion
+from carga_masiva import VentanaCargaMasiva
 
 # Intentar importar tkcalendar para date picker
 try:
@@ -25,38 +27,100 @@ except ImportError:
     print("Advertencia: tkcalendar no instalado. Se usará selector de fecha manual.")
 
 
+class CamposTracker:
+    """Rastrea cambios en el formulario para detectar datos sin guardar."""
+
+    def __init__(self, app):
+        self.app = app
+        self._valores_iniciales = {}
+
+    def guardar_snapshot(self):
+        vals = {}
+        vals["serie"] = app_getattr(self.app, "entry_serie", "get", "")
+        vals["numero"] = app_getattr(self.app, "entry_numero", "get", "")
+        vals["beneficiario"] = app_getattr(self.app, "entry_beneficiario", "get", "")
+        vals["importe"] = app_getattr(self.app, "entry_importe", "get", "")
+        self._valores_iniciales = vals
+
+    def hay_cambios(self):
+        if not self._valores_iniciales:
+            return False
+        return (
+            app_getattr(self.app, "entry_serie", "get", "") != self._valores_iniciales.get("serie")
+            or app_getattr(self.app, "entry_numero", "get", "") != self._valores_iniciales.get("numero")
+            or app_getattr(self.app, "entry_beneficiario", "get", "") != self._valores_iniciales.get("beneficiario")
+            or app_getattr(self.app, "entry_importe", "get", "") != self._valores_iniciales.get("importe")
+        )
+
+
+def app_getattr(obj, attr, method, default=""):
+    sub = getattr(obj, attr, None)
+    if sub is None:
+        return default
+    met = getattr(sub, method, None)
+    if met is None:
+        return default
+    try:
+        return met()
+    except Exception:
+        return default
+
+
 class AplicacionCheques:
     """Aplicación principal de gestión de cheques."""
+    
+    COLORES = {
+        "bg": "#f4f6f8",
+        "surface": "#ffffff",
+        "primary": "#1565c0",
+        "primary_dark": "#0d47a1",
+        "secondary": "#546e7a",
+        "border": "#cfd8dc",
+        "success": "#2e7d32",
+        "error": "#c62828",
+        "warning": "#ef6c00",
+    }
     
     def __init__(self, ventana_principal):
         """Inicializa la aplicación."""
         self.ventana = ventana_principal
         self.ventana.title("Sistema de Emisión de Cheques")
         self.ventana.geometry("1000x700")
+        self.ventana.minsize(800, 550)
         
-        # Inicializar configuración centralizada
         dir_base = Path(__file__).parent
         self.config_mgr = obtener_config(str(dir_base / "config.json"), str(dir_base))
-        
-        # Inicializar módulos
         ruta_bd = self.config_mgr.ruta_bd
         self.db = GestionadorCheques(str(ruta_bd))
         self.generador_pdf = GeneradorPDF()
         
-        # Aplicar Estilos Modernos
         self._aplicar_estilos()
         
-        # Variables de control
+        # Estado del formulario
+        self._formulario_sucio = False
         self.datos_actuales = {}
         self.var_importe = tk.StringVar()
         self.var_importe.trace_add("write", self._on_importe_change)
         
-        # Registrar comando de validación para campos numéricos (con límite de longitud)
         self.vcmd_numerico = (self.ventana.register(self._validar_input_numerico), '%P', '%W')
         
-        # Crear interfaz
+        # Contenedor principal
         self._crear_menu()
+        self._crear_banner()
+        self._crear_statusbar()
         self._crear_notebook()
+        
+        tracker = CamposTracker(self)
+        self._tracker = tracker
+        
+        self.ventana.protocol("WM_DELETE_WINDOW", self._confirmar_salir)
+
+    def _actualizar_statusbar(self):
+        n = len(self.tree_historial.get_children())
+        plantilla = self.combo_plantilla.get() if hasattr(self, "combo_plantilla") else "-"
+        impresora = self.combo_impresora.get() if hasattr(self, "combo_impresora") else "-"
+        self._status_izq.config(text=f"{plantilla}  |  {impresora}")
+        self._status_der.config(text=f"{n} cheque{'s' if n != 1 else ''}")
 
     def _validar_input_numerico(self, nuevo_valor, widget_name):
         """Permite solo la entrada de dígitos y limita la longitud."""
@@ -101,8 +165,7 @@ class AplicacionCheques:
         # Convertir a mayúsculas para campos específicos
         texto = texto.upper()
         
-        # Caracteres permitidos básicos (letras, números, espacios, puntuación básica)
-        caracteres_permitidos = "ABCDEFGHIJKLMNOPQRSTUVWXYZÑ0123456789 .,;-/"
+        caracteres_permitidos = "ABCDEFGHIJKLMNOPQRSTUVWXYZÑÁÉÍÓÚáéíóú0123456789 .,;-/"
         
         if permitir_caracteres_especiales:
             # Permitir más caracteres para campos como concepto
@@ -121,64 +184,83 @@ class AplicacionCheques:
         return texto_sanitizado
 
     def _aplicar_estilos(self):
-        """Configura estilos modernos para la interfaz."""
         style = ttk.Style()
-        style.theme_use('clam')  # Base más moderna que el default de Windows
+        style.theme_use("clam")
+        C = self.COLORES
+        self.ventana.configure(bg=C["bg"])
+
+        style.configure("TNotebook", background=C["bg"], borderwidth=0, padding=0)
+        style.configure("TNotebook.Tab",
+            padding=[30, 10],
+            font=("Segoe UI", 10, "bold"),
+            background="#e0e0e0",
+            foreground=C["secondary"],
+            borderwidth=0)
+        style.map("TNotebook.Tab",
+            background=[("selected", C["primary"]), ("active", "#e3f2fd")],
+            foreground=[("selected", "white"), ("active", C["primary"])],
+            font=[("selected", ("Segoe UI", 11, "bold")), ("!selected", ("Segoe UI", 10, "bold"))])
+
+        style.configure("TLabel", background=C["bg"], font=("Segoe UI", 10))
+        style.configure("Header.TLabel", font=("Segoe UI", 14, "bold"), foreground=C["primary"])
+        style.configure("TButton", padding=8, font=("Segoe UI", 10, "bold"))
+        style.configure("Primary.TButton", background=C["primary"], foreground="white")
+        style.map("Primary.TButton", background=[("active", C["primary_dark"])])
+        style.configure("TLabelframe", background=C["bg"], bordercolor=C["border"], borderwidth=1, relief="solid")
+        style.configure("TLabelframe.Label", background=C["bg"], font=("Segoe UI", 10, "bold"), foreground=C["secondary"])
+
+        style.configure("Status.TLabel", background="#263238", foreground="#eceff1",
+                        font=("Segoe UI", 9), padding=(10, 3))
+        style.configure("Banner.TLabel", background=C["primary_dark"], foreground="white",
+                        font=("Segoe UI", 14, "bold"), padding=(15, 8))
+        style.configure("BannerSub.TLabel", background=C["primary_dark"], foreground="#bbdefb",
+                        font=("Segoe UI", 9), padding=(0, 8))
         
-        # Colores
-        bg_color = "#f0f2f5"
-        primary_color = "#1a73e8"
-        secondary_color = "#5f6368"
-        
-        self.ventana.configure(bg=bg_color)
-        
-        # Estilo para Notebook (pestañas)
-        style.configure("TNotebook", background=bg_color, borderwidth=0, padding=0)
-        style.configure("TNotebook.Tab", 
-                        padding=[30, 12], 
-                        font=("Segoe UI", 10, "bold"),
-                        background="#e0e0e0",
-                        foreground=secondary_color,
-                        borderwidth=0)
-        
-        style.map("TNotebook.Tab", 
-                  background=[("selected", primary_color), ("active", "#e8f0fe")],
-                  foreground=[("selected", "white"), ("active", primary_color)],
-                  padding=[("selected", [40, 15]), ("!selected", [30, 12])],
-                  font=[("selected", ("Segoe UI", 11, "bold")), ("!selected", ("Segoe UI", 10, "bold"))])
-        
-        # Estilo para Labels
-        style.configure("TLabel", background=bg_color, font=("Segoe UI", 10))
-        style.configure("Header.TLabel", font=("Segoe UI", 12, "bold"), foreground=primary_color)
-        
-        # Estilo para Botones
-        style.configure("TButton", padding=10, font=("Segoe UI", 10, "bold"))
-        style.configure("Primary.TButton", background=primary_color, foreground="white")
-        style.map("Primary.TButton", background=[("active", "#1557b0")])
-        
-        # Estilo para LabelFrames
-        style.configure("TLabelframe", background=bg_color, bordercolor="#dadce0", borderwidth=1)
-        style.configure("TLabelframe.Label", background=bg_color, font=("Segoe UI", 10, "bold"), foreground=secondary_color)
-        
+    def _crear_banner(self):
+        frame = tk.Frame(self.ventana, bg=self.COLORES["primary_dark"])
+        frame.pack(fill=tk.X, side=tk.TOP)
+        lbl = tk.Label(frame, text="Sistema de Emisión de Cheques",
+                       bg=self.COLORES["primary_dark"], fg="white",
+                       font=("Segoe UI", 15, "bold"), padx=15, pady=6, anchor=tk.W)
+        lbl.pack(side=tk.LEFT)
+        self._banner_sub = tk.Label(frame, text="",
+                                    bg=self.COLORES["primary_dark"], fg="#bbdefb",
+                                    font=("Segoe UI", 9), anchor=tk.E)
+        self._banner_sub.pack(side=tk.RIGHT, fill=tk.X, expand=True, padx=(5, 15), pady=6)
+        tk.Frame(self.ventana, bg=self.COLORES["primary"], height=2).pack(fill=tk.X, side=tk.TOP)
+
+    def _crear_statusbar(self):
+        frame = tk.Frame(self.ventana, bg="#263238")
+        frame.pack(fill=tk.X, side=tk.BOTTOM)
+        self._status_izq = tk.Label(frame, text="Listo", bg="#263238", fg="#eceff1",
+                                    font=("Segoe UI", 9), padx=10, pady=3, anchor=tk.W)
+        self._status_izq.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self._status_der = tk.Label(frame, text="", bg="#263238", fg="#90a4ae",
+                                    font=("Segoe UI", 9), padx=10, pady=3, anchor=tk.E)
+        self._status_der.pack(side=tk.RIGHT)
+
     def _crear_menu(self):
-        """Crea el menú de la aplicación."""
         menubar = tk.Menu(self.ventana)
         self.ventana.config(menu=menubar)
         
-        # Menú Archivo
         menu_archivo = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="Archivo", menu=menu_archivo)
-        menu_archivo.add_command(label="Salir", command=self.ventana.quit)
+        menu_archivo.add_command(label="Carga Masiva...", command=self._ventana_carga_masiva)
+        menu_archivo.add_command(label="Exportar Historial...", command=self._exportar_csv)
+        menu_archivo.add_separator()
+        menu_archivo.add_command(label="Salir", command=self._confirmar_salir)
         
-        # Menú Ayuda
+        menu_config = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="Configuración", menu=menu_config)
+        menu_config.add_command(label="Calibrar Impresión", command=self._ventana_calibracion)
+        
         menu_ayuda = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="Ayuda", menu=menu_ayuda)
         menu_ayuda.add_command(label="Acerca de", command=self._about)
     
     def _crear_notebook(self):
-        """Crea el notebook (pestañas) principal."""
         self.notebook = ttk.Notebook(self.ventana)
-        self.notebook.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        self.notebook.pack(fill=tk.BOTH, expand=True, padx=8, pady=(5, 8))
         
         # Pestaña 1: Ingreso
         frame_ingreso = ttk.Frame(self.notebook)
@@ -191,246 +273,244 @@ class AplicacionCheques:
         self._crear_tab_historial(frame_historial)
     
     def _crear_tab_ingreso(self, frame_padre):
-        """Crea la pestaña de ingreso de cheques con un diseño similar a un cheque real."""
-        # Contenedor centrado
         contenedor = ttk.Frame(frame_padre)
-        contenedor.pack(expand=True, fill=tk.BOTH, padx=40, pady=20)
+        contenedor.pack(expand=True, fill=tk.BOTH, padx=50, pady=20)
 
-        # === Barra de Configuración Superior ===
-        frame_config = ttk.Frame(contenedor)
-        frame_config.pack(fill=tk.X, pady=(0, 20))
+        # Toolbar
+        tb = tk.Frame(contenedor, bg=self.COLORES["surface"], bd=0,
+                      highlightbackground=self.COLORES["border"], highlightthickness=1)
+        tb.pack(fill=tk.X, pady=(0, 18))
 
-        ttk.Label(frame_config, text="Plantilla:", font=("Segoe UI", 9, "bold")).pack(side=tk.LEFT, padx=5)
+        tk.Label(tb, text="Plantilla:", bg=self.COLORES["surface"],
+                 font=("Segoe UI", 9, "bold"), fg=self.COLORES["secondary"]).pack(side=tk.LEFT, padx=(12, 4))
         plantillas = self.generador_pdf.listar_plantillas()
-        self.combo_plantilla = ttk.Combobox(frame_config, values=plantillas, state="readonly", width=25)
+        self.combo_plantilla = ttk.Combobox(tb, values=plantillas, state="readonly", width=22)
         if plantillas:
             plantilla_def = self.config_mgr.plantilla_actual or plantillas[0]
             self.combo_plantilla.set(plantilla_def)
-        self.combo_plantilla.pack(side=tk.LEFT, padx=5)
+        self.combo_plantilla.bind("<<ComboboxSelected>>", self._guardar_config_general)
+        self.combo_plantilla.pack(side=tk.LEFT, padx=4)
 
-        ttk.Label(frame_config, text="Impresora:", font=("Segoe UI", 9, "bold")).pack(side=tk.LEFT, padx=15)
+        # Configuración de rotación (Alimentación Vertical)
+        self.var_rotar = tk.BooleanVar(value=self.config_mgr.rotar_90)
+        chk_rotar = tk.Checkbutton(tb, text="Alimentación Vertical", variable=self.var_rotar,
+                                  bg=self.COLORES["surface"], font=("Segoe UI", 9),
+                                  activebackground=self.COLORES["surface"],
+                                  command=self._guardar_config_general)
+        chk_rotar.pack(side=tk.LEFT, padx=(15, 0))
+
+        tk.Label(tb, text="Impresora:", bg=self.COLORES["surface"],
+                 font=("Segoe UI", 9, "bold"), fg=self.COLORES["secondary"]).pack(side=tk.LEFT, padx=(18, 4))
         impresoras = self.generador_pdf.listar_impresoras()
-        self.combo_impresora = ttk.Combobox(frame_config, values=impresoras, state="readonly", width=30)
+        self.combo_impresora = ttk.Combobox(tb, values=impresoras, state="readonly", width=28)
         impresora_def = self.config_mgr.impresora_predeterminada
         if impresora_def in impresoras:
             self.combo_impresora.set(impresora_def)
         elif impresoras:
             self.combo_impresora.set(impresoras[0])
-        self.combo_impresora.pack(side=tk.LEFT, padx=5)
+        self.combo_impresora.pack(side=tk.LEFT, padx=4)
         self.combo_impresora.bind("<<ComboboxSelected>>", self._guardar_impresora_config)
 
-        # === Representación Visual del Cheque ===
-        cheque_bg = "#ffffff"
-        frame_cheque = tk.Frame(contenedor, bg=cheque_bg, bd=2, relief=tk.RIDGE, padx=30, pady=30)
-        frame_cheque.pack(fill=tk.X, pady=10)
+        # Check card
+        CARD_BG = "#ffffff"
+        card = tk.Frame(contenedor, bg=CARD_BG, bd=0,
+                        highlightbackground=self.COLORES["border"], highlightthickness=1)
+        card.pack(fill=tk.X, pady=6)
+        inner = tk.Frame(card, bg=CARD_BG, padx=28, pady=24)
+        inner.pack(fill=tk.X)
 
-        # Fila 1: Serie, Número e Importe Numérico
-        fila1 = tk.Frame(frame_cheque, bg=cheque_bg)
-        fila1.pack(fill=tk.X, pady=10)
-        
-        tk.Label(fila1, text="Serie:", bg=cheque_bg, font=("Segoe UI", 10, "bold")).pack(side=tk.LEFT)
-        self.entry_serie = tk.Entry(fila1, width=8, font=("Segoe UI", 11), bd=1, relief=tk.SOLID)
+        # Fila 1
+        f1 = tk.Frame(inner, bg=CARD_BG)
+        f1.pack(fill=tk.X, pady=6)
+        _lbl = lambda parent, text, **kw: tk.Label(parent, text=text, bg=CARD_BG,
+                    font=("Segoe UI", 10, "bold"), fg="#37474f", **kw)
+
+        _lbl(f1, "Serie:").pack(side=tk.LEFT)
+        self.entry_serie = tk.Entry(f1, width=8, font=("Segoe UI", 11),
+                                    bd=1, relief=tk.SOLID, highlightbackground=self.COLORES["border"])
         self.entry_serie.pack(side=tk.LEFT, padx=5)
-        
-        tk.Label(fila1, text="Número:", bg=cheque_bg, font=("Segoe UI", 10, "bold")).pack(side=tk.LEFT, padx=(15, 0))
-        self.entry_numero = tk.Entry(fila1, width=15, font=("Segoe UI", 11), bd=1, relief=tk.SOLID, validate="key", validatecommand=self.vcmd_numerico)
+        _lbl(f1, "Número:").pack(side=tk.LEFT, padx=(15, 0))
+        self.entry_numero = tk.Entry(f1, width=14, font=("Segoe UI", 11),
+                                     bd=1, relief=tk.SOLID, highlightbackground=self.COLORES["border"],
+                                     validate="key", validatecommand=self.vcmd_numerico)
         self.entry_numero.pack(side=tk.LEFT, padx=5)
-        
-        # Importe a la derecha
-        frame_monto = tk.Frame(fila1, bg="#f8f9fa", bd=1, relief=tk.SOLID, padx=10, pady=5)
-        frame_monto.pack(side=tk.RIGHT)
-        tk.Label(frame_monto, text="Gs.", bg="#f8f9fa", font=("Segoe UI", 11, "bold")).pack(side=tk.LEFT)
-        self.entry_importe = tk.Entry(frame_monto, width=18, font=("Segoe UI", 12, "bold"), bd=0, bg="#f8f9fa", 
-                                    textvariable=self.var_importe, justify='right',
-                                    validate="key", validatecommand=self.vcmd_numerico)
+
+        monto_bg = "#e8f5e9"
+        fm = tk.Frame(f1, bg=monto_bg, bd=1, relief=tk.SOLID,
+                      highlightbackground="#a5d6a7", padx=12, pady=5)
+        fm.pack(side=tk.RIGHT)
+        tk.Label(fm, text="Gs.", bg=monto_bg, font=("Segoe UI", 12, "bold"),
+                 fg=self.COLORES["success"]).pack(side=tk.LEFT)
+        self.entry_importe = tk.Entry(fm, width=16, font=("Segoe UI", 13, "bold"),
+                                      bd=0, bg=monto_bg, fg=self.COLORES["success"],
+                                      textvariable=self.var_importe, justify="right",
+                                      validate="key", validatecommand=self.vcmd_numerico)
         self.entry_importe.pack(side=tk.LEFT, padx=5)
 
-        # Fila 2: Fecha y Beneficiario
-        fila2 = tk.Frame(frame_cheque, bg=cheque_bg)
-        fila2.pack(fill=tk.X, pady=15)
-
-        tk.Label(fila2, text="Fecha:", bg=cheque_bg, font=("Segoe UI", 10, "bold")).pack(side=tk.LEFT)
+        # Fila 2
+        f2 = tk.Frame(inner, bg=CARD_BG)
+        f2.pack(fill=tk.X, pady=8)
+        _lbl(f2, "Fecha:").pack(side=tk.LEFT)
         if TIENE_TKCALENDAR:
-            self.date_emision = DateEntry(fila2, width=12, font=("Segoe UI", 10))
+            self.date_emision = DateEntry(f2, width=12, font=("Segoe UI", 10))
             self.date_emision.pack(side=tk.LEFT, padx=5)
         else:
-            self.spinbox_dia = tk.Spinbox(fila2, from_=1, to=31, width=3, font=("Segoe UI", 10))
+            self.spinbox_dia = tk.Spinbox(f2, from_=1, to=31, width=3, font=("Segoe UI", 10))
             self.spinbox_dia.pack(side=tk.LEFT, padx=2)
-            self.spinbox_mes = tk.Spinbox(fila2, from_=1, to=12, width=3, font=("Segoe UI", 10))
+            self.spinbox_mes = tk.Spinbox(f2, from_=1, to=12, width=3, font=("Segoe UI", 10))
             self.spinbox_mes.pack(side=tk.LEFT, padx=2)
-
-        tk.Label(fila2, text="Páguese a la orden de:", bg=cheque_bg, font=("Segoe UI", 10, "bold")).pack(side=tk.LEFT, padx=(30, 0))
-        self.entry_beneficiario = tk.Entry(fila2, font=("Segoe UI", 11), bd=0, highlightthickness=1, highlightbackground="#ced4da")
+        _lbl(f2, "Páguese a la orden de:").pack(side=tk.LEFT, padx=(25, 0))
+        self.entry_beneficiario = tk.Entry(f2, font=("Segoe UI", 11),
+                                           bd=0, highlightthickness=1,
+                                           highlightbackground=self.COLORES["border"])
         self.entry_beneficiario.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
 
-        # Fila 3: Importe en Letras
-        fila3 = tk.Frame(frame_cheque, bg=cheque_bg)
-        fila3.pack(fill=tk.X, pady=15)
-        tk.Label(fila3, text="La suma de:", bg=cheque_bg, font=("Segoe UI", 10, "bold")).pack(side=tk.LEFT)
-        self.lbl_importe_letras = tk.Label(fila3, text="...", bg="#f1f3f4", font=("Segoe UI", 10, "italic"), anchor="w", padx=10)
+        # Fila 3
+        f3 = tk.Frame(inner, bg=CARD_BG)
+        f3.pack(fill=tk.X, pady=8)
+        _lbl(f3, "La suma de:").pack(side=tk.LEFT)
+        self.lbl_importe_letras = tk.Label(f3, text="...", bg="#f5f5f5",
+                                           font=("Segoe UI", 10, "italic"),
+                                           fg="#546e7a", anchor="w", padx=10)
         self.lbl_importe_letras.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
 
-        # Fila 4: Concepto
-        fila4 = tk.Frame(frame_cheque, bg=cheque_bg)
-        fila4.pack(fill=tk.X, pady=15)
-        tk.Label(fila4, text="Concepto:", bg=cheque_bg, font=("Segoe UI", 10, "bold")).pack(side=tk.LEFT)
-        self.text_concepto = tk.Text(fila4, height=2, font=("Segoe UI", 10), bd=1, relief=tk.SOLID)
+        # Fila 4
+        f4 = tk.Frame(inner, bg=CARD_BG)
+        f4.pack(fill=tk.X, pady=8)
+        _lbl(f4, "Concepto:").pack(side=tk.LEFT, anchor=tk.N)
+        self.text_concepto = tk.Text(f4, height=2, font=("Segoe UI", 10),
+                                     bd=1, relief=tk.SOLID,
+                                     highlightbackground=self.COLORES["border"])
         self.text_concepto.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
 
-        # === Botones de Acción ===
-        frame_acciones = ttk.Frame(contenedor)
-        frame_acciones.pack(fill=tk.X, pady=20)
-        
-        ttk.Button(frame_acciones, text="👁 Vista Previa", command=self._vista_previa, width=15).pack(side=tk.LEFT, padx=5)
-        ttk.Button(frame_acciones, text="🖨 Imprimir", style="Primary.TButton", command=self._imprimir, width=15).pack(side=tk.LEFT, padx=5)
-        ttk.Button(frame_acciones, text="💾 Guardar", command=self._guardar_cheque, width=15).pack(side=tk.LEFT, padx=5)
-        ttk.Button(frame_acciones, text="🧹 Limpiar", command=self._limpiar_form, width=15).pack(side=tk.LEFT, padx=5)
-        ttk.Button(frame_acciones, text="🚪 Salir", command=self.ventana.quit, width=15).pack(side=tk.RIGHT, padx=5)
+        # Botones
+        btn_frame = tk.Frame(contenedor, bg=self.COLORES["bg"])
+        btn_frame.pack(fill=tk.X, pady=(15, 5))
+
+        btn_data = [
+            ("Vista Previa", self._vista_previa, "Primary.TButton"),
+            ("Imprimir", self._imprimir, "Primary.TButton"),
+            ("Guardar", self._guardar_cheque, "TButton"),
+            ("Limpiar", self._limpiar_form, "TButton"),
+        ]
+        for txt, cmd, style in btn_data:
+            ttk.Button(btn_frame, text=txt, command=cmd, style=style, width=14).pack(side=tk.LEFT, padx=4)
+
+        ttk.Button(btn_frame, text="Salir", command=self._confirmar_salir, width=10).pack(side=tk.RIGHT, padx=4)
     
     def _crear_tab_historial(self, frame_padre):
-        """Crea la pestaña de historial de cheques."""
-        # Frame de filtros
-        frame_filtros = ttk.LabelFrame(frame_padre, text="Filtros", padding=10)
-        frame_filtros.pack(fill=tk.X, padx=10, pady=10)
-        
-        # Filtro por serie
-        ttk.Label(frame_filtros, text="Serie:").grid(row=0, column=0, sticky=tk.W, padx=5)
-        self.entry_filtro_serie = ttk.Entry(frame_filtros, width=10)
+        bg = self.COLORES["bg"]
+
+        # 1. Acciones inferiores (Se empaquetan PRIMERO con side=tk.BOTTOM)
+        # Esto garantiza que siempre sean visibles y la tabla use el espacio restante
+        acc = ttk.LabelFrame(frame_padre, text="Cheque Seleccionado", padding=8)
+        acc.pack(side=tk.BOTTOM, fill=tk.X, padx=10, pady=(5, 10))
+
+        ttk.Button(acc, text="🖨 Reimprimir", style="Primary.TButton",
+                   command=self._reimprimir_seleccionado).pack(side=tk.LEFT, padx=4)
+        ttk.Button(acc, text="👁 Vista Previa",
+                   command=self._vista_previa_seleccionado).pack(side=tk.LEFT, padx=4)
+        ttk.Button(acc, text="❌ Anular",
+                   command=self._anular_cheque_seleccionado).pack(side=tk.LEFT, padx=4)
+        ttk.Button(acc, text="✅ Reactivar",
+                   command=self._reactivar_cheque_seleccionado).pack(side=tk.LEFT, padx=4)
+        ttk.Button(acc, text="📂 Abrir PDFs",
+                   command=self._abrir_carpeta_pdfs).pack(side=tk.RIGHT, padx=4)
+
+        # 2. Barra de resumen superior
+        sum_frame = tk.Frame(frame_padre, bg=self.COLORES["surface"],
+                             highlightbackground=self.COLORES["border"], highlightthickness=1)
+        sum_frame.pack(side=tk.TOP, fill=tk.X, padx=10, pady=(10, 5))
+        self._lbl_sum = tk.Label(sum_frame, text="0 cheques  |  Total: Gs. 0",
+                                 bg=self.COLORES["surface"], fg=self.COLORES["secondary"],
+                                 font=("Segoe UI", 10), anchor=tk.W, padx=12, pady=5)
+        self._lbl_sum.pack(side=tk.LEFT)
+        btn_export = tk.Button(sum_frame, text="Exportar CSV", bg="#e3f2fd",
+                               font=("Segoe UI", 9), fg=self.COLORES["primary"],
+                               bd=1, relief=tk.SOLID, padx=10,
+                               command=self._exportar_csv)
+        btn_export.pack(side=tk.RIGHT, padx=8, pady=3)
+
+        # 3. Filtros
+        filtros = ttk.LabelFrame(frame_padre, text="Filtros", padding=8)
+        filtros.pack(side=tk.TOP, fill=tk.X, padx=10, pady=5)
+
+        labels = [
+            ("Serie:", 0, 0), ("Número Desde:", 1, 0), ("Fecha Desde:", 2, 0),
+            ("Beneficiario:", 0, 2), ("Hasta:", 1, 2), ("Fecha Hasta:", 2, 2),
+        ]
+        self._entries_filtro = {}
+        for txt, r, c in labels:
+            tk.Label(filtros, text=txt, font=("Segoe UI", 9, "bold"),
+                     fg=self.COLORES["secondary"]).grid(row=r, column=c, sticky=tk.W, padx=5, pady=3)
+
+        self.entry_filtro_serie = ttk.Entry(filtros, width=10)
         self.entry_filtro_serie.grid(row=0, column=1, sticky=tk.W, padx=5)
-        
-        # Filtro por beneficiario
-        ttk.Label(frame_filtros, text="Beneficiario:").grid(row=0, column=2, sticky=tk.W, padx=5)
-        self.entry_filtro_beneficiario = ttk.Entry(frame_filtros, width=20)
+        self.entry_filtro_beneficiario = ttk.Entry(filtros, width=20)
         self.entry_filtro_beneficiario.grid(row=0, column=3, sticky=tk.W, padx=5)
-        
-        # Filtro por rango de números
-        ttk.Label(frame_filtros, text="Número Desde:").grid(row=1, column=0, sticky=tk.W, padx=5, pady=5)
-        self.spinbox_filtro_num_desde = ttk.Spinbox(frame_filtros, from_=0, to=999999, width=10)
-        self.spinbox_filtro_num_desde.grid(row=1, column=1, sticky=tk.W, padx=5, pady=5)
-        
-        ttk.Label(frame_filtros, text="Hasta:").grid(row=1, column=2, sticky=tk.W, padx=5, pady=5)
-        self.spinbox_filtro_num_hasta = ttk.Spinbox(frame_filtros, from_=0, to=999999, width=10)
-        self.spinbox_filtro_num_hasta.grid(row=1, column=3, sticky=tk.W, padx=5, pady=5)
-        
-        # Filtro por rango de fecha
-        ttk.Label(frame_filtros, text="Fecha Desde:").grid(row=2, column=0, sticky=tk.W, padx=5, pady=5)
+
+        self.spinbox_filtro_num_desde = ttk.Spinbox(filtros, from_=0, to=999999, width=10)
+        self.spinbox_filtro_num_desde.grid(row=1, column=1, sticky=tk.W, padx=5, pady=3)
+        self.spinbox_filtro_num_hasta = ttk.Spinbox(filtros, from_=0, to=999999, width=10)
+        self.spinbox_filtro_num_hasta.grid(row=1, column=3, sticky=tk.W, padx=5, pady=3)
+
         if TIENE_TKCALENDAR:
-            self.date_filtro_desde = DateEntry(frame_filtros, width=12)
+            self.date_filtro_desde = DateEntry(filtros, width=12)
+            self.date_filtro_desde.grid(row=2, column=1, sticky=tk.W, padx=5, pady=3)
+            self.date_filtro_hasta = DateEntry(filtros, width=12)
+            self.date_filtro_hasta.grid(row=2, column=3, sticky=tk.W, padx=5, pady=3)
         else:
-            self.date_filtro_desde = ttk.Entry(frame_filtros, width=12)
+            self.date_filtro_desde = ttk.Entry(filtros, width=12)
             self.date_filtro_desde.insert(0, "dd/mm")
-        self.date_filtro_desde.grid(row=2, column=1, sticky=tk.W, padx=5, pady=5)
-        
-        ttk.Label(frame_filtros, text="Fecha Hasta:").grid(row=2, column=2, sticky=tk.W, padx=5, pady=5)
-        if TIENE_TKCALENDAR:
-            self.date_filtro_hasta = DateEntry(frame_filtros, width=12)
-        else:
-            self.date_filtro_hasta = ttk.Entry(frame_filtros, width=12)
+            self.date_filtro_desde.grid(row=2, column=1, sticky=tk.W, padx=5, pady=3)
+            self.date_filtro_hasta = ttk.Entry(filtros, width=12)
             self.date_filtro_hasta.insert(0, "dd/mm")
-        self.date_filtro_hasta.grid(row=2, column=3, sticky=tk.W, padx=5, pady=5)
-        
-        # Botones de filtro
-        btn_filtrar = ttk.Button(frame_filtros, text="Filtrar", command=self._aplicar_filtros)
-        btn_filtrar.grid(row=0, column=6, sticky=tk.W, padx=10)
-        
-        btn_limpiar_filtros = ttk.Button(frame_filtros, text="Limpiar Filtros", command=self._limpiar_filtros)
-        btn_limpiar_filtros.grid(row=1, column=6, sticky=tk.W, padx=10)
-        
-        btn_recargar = ttk.Button(frame_filtros, text="Recargar (F5)", command=self._recargar_historial)
-        btn_recargar.grid(row=2, column=6, sticky=tk.W, padx=10)
-        
-        # Frame de tabla
-        frame_tabla = ttk.Frame(frame_padre)
-        frame_tabla.pack(fill=tk.BOTH, expand=True, padx=10, pady=(5, 0))
-        
-        # Crear Treeview con scrollbar
-        scrollbar_y = ttk.Scrollbar(frame_tabla)
-        scrollbar_x = ttk.Scrollbar(frame_tabla, orient=tk.HORIZONTAL)
-        
-        # Reducir height significativamente para dejar espacio abajo
+            self.date_filtro_hasta.grid(row=2, column=3, sticky=tk.W, padx=5, pady=3)
+
+        btn_frame = tk.Frame(filtros, bg=self.COLORES["bg"])
+        btn_frame.grid(row=0, column=5, rowspan=3, sticky=tk.N, padx=(15, 0), pady=3)
+        ttk.Button(btn_frame, text="Filtrar", command=self._aplicar_filtros).pack(pady=2)
+        ttk.Button(btn_frame, text="Limpiar", command=self._limpiar_filtros).pack(pady=2)
+        ttk.Button(btn_frame, text="Recargar (F5)", command=self._recargar_historial).pack(pady=2)
+
+        # 4. Tabla (Se empaqueta al FINAL para que use el espacio expandible central)
+        tabla_container = ttk.Frame(frame_padre)
+        tabla_container.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=10, pady=(5, 0))
+
+        sy = ttk.Scrollbar(tabla_container)
+        sx = ttk.Scrollbar(tabla_container, orient=tk.HORIZONTAL)
+
         self.tree_historial = ttk.Treeview(
-            frame_tabla,
+            tabla_container,
             columns=("id", "serie", "numero", "beneficiario", "importe", "fecha", "concepto", "estado"),
             height=10,
-            yscrollcommand=scrollbar_y.set,
-            xscrollcommand=scrollbar_x.set
+            yscrollcommand=sy.set,
+            xscrollcommand=sx.set
         )
-        
-        scrollbar_y.config(command=self.tree_historial.yview)
-        scrollbar_x.config(command=self.tree_historial.xview)
-        
-        # Configurar columnas
-        self.tree_historial.column("#0", width=0, stretch=tk.NO)
-        self.tree_historial.column("id", anchor=tk.CENTER, width=40)
-        self.tree_historial.column("serie", anchor=tk.CENTER, width=60)
-        self.tree_historial.column("numero", anchor=tk.CENTER, width=80)
-        self.tree_historial.column("beneficiario", anchor=tk.W, width=200)
-        self.tree_historial.column("importe", anchor=tk.E, width=120)
-        self.tree_historial.column("fecha", anchor=tk.CENTER, width=80)
-        self.tree_historial.column("concepto", anchor=tk.W, width=250)
-        self.tree_historial.column("estado", anchor=tk.CENTER, width=80)
+        sy.config(command=self.tree_historial.yview)
+        sx.config(command=self.tree_historial.xview)
 
-        self.tree_historial.heading("#0", text="", anchor=tk.W)
-        self.tree_historial.heading("id", text="ID")
-        self.tree_historial.heading("serie", text="Serie")
-        self.tree_historial.heading("numero", text="Número")
-        self.tree_historial.heading("beneficiario", text="Beneficiario")
-        self.tree_historial.heading("importe", text="Importe")
-        self.tree_historial.heading("fecha", text="Fecha")
-        self.tree_historial.heading("concepto", text="Concepto")
-        self.tree_historial.heading("estado", text="Estado")
-        
+        col_widths = {"#0": 0, "id": 40, "serie": 60, "numero": 80, "beneficiario": 200,
+                      "importe": 120, "fecha": 80, "concepto": 250, "estado": 80}
+        for col, w in col_widths.items():
+            self.tree_historial.column(col, anchor=tk.CENTER, width=w)
+        self.tree_historial.column("beneficiario", anchor=tk.W)
+        self.tree_historial.column("concepto", anchor=tk.W)
+        self.tree_historial.column("importe", anchor=tk.E)
+
+        headings = [("#0", ""), ("id", "ID"), ("serie", "Serie"), ("numero", "Número"),
+                    ("beneficiario", "Beneficiario"), ("importe", "Importe"),
+                    ("fecha", "Fecha"), ("concepto", "Concepto"), ("estado", "Estado")]
+        for col, txt in headings:
+            self.tree_historial.heading(col, text=txt)
+
         self.tree_historial.grid(row=0, column=0, sticky=tk.NSEW)
-        scrollbar_y.grid(row=0, column=1, sticky=tk.NS)
-        scrollbar_x.grid(row=1, column=0, sticky=tk.EW)
-        
-        frame_tabla.grid_rowconfigure(0, weight=1)
-        frame_tabla.grid_columnconfigure(0, weight=1)
-        
-        # === Panel de Acciones Inferior ===
-        frame_acciones_historial = ttk.LabelFrame(frame_padre, text="Acciones de Cheque Seleccionado", padding=10)
-        frame_acciones_historial.pack(fill=tk.X, padx=10, pady=(5, 10))
-        
-        btn_reimprimir = ttk.Button(
-            frame_acciones_historial, 
-            text="🖨 Reimprimir", 
-            style="Primary.TButton",
-            command=self._reimprimir_seleccionado
-        )
-        btn_reimprimir.pack(side=tk.LEFT, padx=10)
-        
-        btn_vista_previa_historial = ttk.Button(
-            frame_acciones_historial,
-            text="👁 Vista Previa",
-            command=self._vista_previa_seleccionado
-        )
-        btn_vista_previa_historial.pack(side=tk.LEFT, padx=5)
+        sy.grid(row=0, column=1, sticky=tk.NS)
+        sx.grid(row=1, column=0, sticky=tk.EW)
+        tabla_container.grid_rowconfigure(0, weight=1)
+        tabla_container.grid_columnconfigure(0, weight=1)
 
-        btn_anular = ttk.Button(
-            frame_acciones_historial,
-            text="❌ Anular Cheque",
-            command=self._anular_cheque_seleccionado
-        )
-        btn_anular.pack(side=tk.LEFT, padx=5)
-
-        btn_reactivar = ttk.Button(
-            frame_acciones_historial,
-            text="✅ Reactivar",
-            command=self._reactivar_cheque_seleccionado
-        )
-        btn_reactivar.pack(side=tk.LEFT, padx=5)
-
-        btn_abrir_pdf = ttk.Button(
-            frame_acciones_historial,
-            text="📂 Abrir Carpeta PDFs",
-            command=self._abrir_carpeta_pdfs
-        )
-        btn_abrir_pdf.pack(side=tk.RIGHT, padx=10)
-        
-        # Vincular F5 para recargar
         self.ventana.bind("<F5>", lambda e: self._recargar_historial())
-        
-        # Cargar historial inicial
         self._recargar_historial()
     
     def _on_importe_change(self, *args):
@@ -496,10 +576,12 @@ class AplicacionCheques:
             fecha_obj = self.date_emision.get_date()
             return f"{fecha_obj.day:02d}/{fecha_obj.month:02d}/{fecha_obj.year}"
         else:
-            dia = self.spinbox_dia.get().zfill(2)
-            mes = self.spinbox_mes.get().zfill(2)
+            dia = int(self.spinbox_dia.get())
+            mes = int(self.spinbox_mes.get())
             anio = date.today().year
-            return f"{dia}/{mes}/{anio}"
+            from datetime import date as dt_date
+            dt_date(anio, mes, dia)
+            return f"{dia:02d}/{mes:02d}/{anio}"
 
     def _obtener_fecha_cheque(self):
         """Obtiene la fecha del formulario en formato espaciado para el cheque (solo DD y MM)."""
@@ -513,20 +595,24 @@ class AplicacionCheques:
             return f"{dia}      {mes}"
 
     def _obtener_filtro_fecha(self, widget):
-        """Devuelve la fecha del filtro en formato dd/mm o None si no está válida."""
+        """Devuelve la fecha del filtro en formato dd/mm/yyyy o None."""
         try:
             if TIENE_TKCALENDAR and hasattr(widget, "get_date"):
                 fecha_obj = widget.get_date()
-                return f"{fecha_obj.day:02d}/{fecha_obj.month:02d}"
+                return f"{fecha_obj.day:02d}/{fecha_obj.month:02d}/{fecha_obj.year}"
             fecha = widget.get().strip()
             if not fecha or fecha.lower() == "dd/mm":
                 return None
             partes = fecha.split("/")
-            if len(partes) != 2:
-                return None
             dia = int(partes[0])
             mes = int(partes[1])
-            return f"{dia:02d}/{mes:02d}"
+            if len(partes) >= 3:
+                anio = int(partes[2])
+            else:
+                anio = date.today().year
+            from datetime import date as dt_date
+            dt_date(anio, mes, dia)
+            return f"{dia:02d}/{mes:02d}/{anio}"
         except (ValueError, IndexError, AttributeError):
             return None
     
@@ -572,14 +658,14 @@ class AplicacionCheques:
             if self.generador_pdf.imprimir_directamente(ruta_pdf, nombre_impresora=impresora):
                 # 4. Si la impresión se envió, guardar en la BD
                 if self.db.insertar_cheque(
-                    datos["serie"],
-                    int(datos["numero"]),
+                    datos_raw["serie"],
+                    int(datos_raw["numero"]),
                     datos_raw["fecha_db"],
-                    datos["beneficiario"],
-                    datos_raw["importe_num"], # Ya es int desde _obtener_datos_formulario
-                    datos["importe_letras"],
-                    datos["concepto"],
-                    datos.get("plantilla", "")
+                    datos_raw["beneficiario"],
+                    datos_raw["importe_num"],
+                    datos_raw["importe_letras"],
+                    datos_raw["concepto"],
+                    datos_raw.get("plantilla", "")
                 ):
                     messagebox.showinfo("Éxito", f"Cheque impreso y guardado correctamente.\nImpresora: {impresora}")
                     self._limpiar_form()
@@ -594,11 +680,15 @@ class AplicacionCheques:
         self.config_mgr.impresora_predeterminada = self.combo_impresora.get()
         self.config_mgr.guardar()
     
-    def _guardar_config_general(self):
+    def _guardar_config_general(self, event=None):
         """Guarda la configuración actual usando el gestor centralizado."""
         # Actualizar variables desde la UI
         self.config_mgr.plantilla_actual = self.combo_plantilla.get()
+        self.config_mgr.rotar_90 = self.var_rotar.get()
         self.config_mgr.guardar()
+        
+        # Notificar al generador PDF que la config cambió
+        self.generador_pdf.config = self.config_mgr.a_dict()
     
     def _guardar_cheque(self):
         """Guarda el cheque en BD y genera PDF."""
@@ -704,13 +794,22 @@ class AplicacionCheques:
         if TIENE_TKCALENDAR:
             try:
                 fecha_obj = self.date_emision.get_date()
-                # Validar que no sea una fecha futura (más de 30 días)
                 from datetime import timedelta
                 if fecha_obj > (date.today() + timedelta(days=30)):
                     messagebox.showerror("Error", "La fecha no puede ser más de 30 días en el futuro")
                     return False
             except (ValueError, AttributeError, TypeError):
                 messagebox.showerror("Error", "La fecha no es válida")
+                return False
+        else:
+            try:
+                from datetime import date as dt_date
+                dia = int(self.spinbox_dia.get())
+                mes = int(self.spinbox_mes.get())
+                anio = date.today().year
+                dt_date(anio, mes, dia)
+            except ValueError:
+                messagebox.showerror("Error", "La fecha no es válida (día o mes incorrecto)")
                 return False
         
         return True
@@ -745,92 +844,65 @@ class AplicacionCheques:
         }
     
     def _recargar_historial(self):
-        """Recarga el historial de cheques."""
-        print("Recargando historial...")
-        # Limpiar tabla
         for item in self.tree_historial.get_children():
             self.tree_historial.delete(item)
-        
-        # Cargar últimos 100 cheques
+
         historial = self.db.obtener_ultimos(100)
-        print(f"Cheques encontrados en BD: {len(historial)}")
-        
+        total = 0
+
         for cheque in historial:
-            # Formatear importe con puntos para el historial
             try:
-                importe_formateado = f"{int(cheque['importe_num']):,}".replace(",", ".")
-            except:
-                importe_formateado = cheque['importe_num']
+                imp = int(cheque["importe_num"])
+                total += imp
+                imp_fmt = f"{imp:,}".replace(",", ".")
+            except (ValueError, TypeError):
+                imp_fmt = cheque["importe_num"]
 
-            # Obtener estado (default: activo)
             estado = cheque.get("estado", "activo")
+            self.tree_historial.insert("", tk.END, values=(
+                cheque["id"], cheque["serie"], cheque["numero"],
+                cheque["beneficiario"], imp_fmt,
+                cheque["fecha_emision"], cheque.get("concepto", ""), estado))
 
-            self.tree_historial.insert(
-                "",
-                tk.END,
-                values=(
-                    cheque["id"],
-                    cheque["serie"],
-                    cheque["numero"],
-                    cheque["beneficiario"],
-                    importe_formateado,
-                    cheque["fecha_emision"],
-                    cheque.get("concepto", ""),
-                    estado
-                )
-            )
+        n = len(historial)
+        self._lbl_sum.config(
+            text=f"{n} cheque{'s' if n != 1 else ''}  |  Total: Gs. {total:,}".replace(",", "."))
+        self._actualizar_statusbar()
     
     def _aplicar_filtros(self):
-        """Aplica filtros al historial."""
-        # Limpiar tabla
         for item in self.tree_historial.get_children():
             self.tree_historial.delete(item)
-        
-        # Obtener parámetros de filtro
+
         serie = self.entry_filtro_serie.get() or None
         beneficiario = self.entry_filtro_beneficiario.get() or None
-        num_desde = self.spinbox_filtro_num_desde.get()
-        num_hasta = self.spinbox_filtro_num_hasta.get()
+        num_desde = int(self.spinbox_filtro_num_desde.get()) if self.spinbox_filtro_num_desde.get() else None
+        num_hasta = int(self.spinbox_filtro_num_hasta.get()) if self.spinbox_filtro_num_hasta.get() else None
         fecha_desde = self._obtener_filtro_fecha(self.date_filtro_desde)
         fecha_hasta = self._obtener_filtro_fecha(self.date_filtro_hasta)
-        
-        num_desde = int(num_desde) if num_desde else None
-        num_hasta = int(num_hasta) if num_hasta else None
-        
-        # Filtrar
+
         historial = self.db.filtrar_cheques(
-            serie=serie,
-            numero_desde=num_desde,
-            numero_hasta=num_hasta,
-            fecha_desde=fecha_desde,
-            fecha_hasta=fecha_hasta,
-            beneficiario=beneficiario
-        )
-        
+            serie=serie, numero_desde=num_desde, numero_hasta=num_hasta,
+            fecha_desde=fecha_desde, fecha_hasta=fecha_hasta,
+            beneficiario=beneficiario)
+
+        total = 0
         for cheque in historial:
-            # Formatear importe con puntos para el historial
             try:
-                importe_formateado = f"{int(cheque['importe_num']):,}".replace(",", ".")
-            except:
-                importe_formateado = cheque['importe_num']
+                imp = int(cheque["importe_num"])
+                total += imp
+                imp_fmt = f"{imp:,}".replace(",", ".")
+            except (ValueError, TypeError):
+                imp_fmt = cheque["importe_num"]
 
-            # Obtener estado (default: activo)
             estado = cheque.get("estado", "activo")
+            self.tree_historial.insert("", tk.END, values=(
+                cheque["id"], cheque["serie"], cheque["numero"],
+                cheque["beneficiario"], imp_fmt,
+                cheque["fecha_emision"], cheque.get("concepto", ""), estado))
 
-            self.tree_historial.insert(
-                "",
-                tk.END,
-                values=(
-                    cheque["id"],
-                    cheque["serie"],
-                    cheque["numero"],
-                    cheque["beneficiario"],
-                    importe_formateado,
-                    cheque["fecha_emision"],
-                    cheque.get("concepto", ""),
-                    estado
-                )
-            )
+        n = len(historial)
+        self._lbl_sum.config(
+            text=f"{n} cheque{'s' if n != 1 else ''}  |  Total: Gs. {total:,}".replace(",", "."))
     
     def _limpiar_filtros(self):
         """Limpia los filtros y recarga el historial."""
@@ -845,6 +917,23 @@ class AplicacionCheques:
             self.date_filtro_hasta.insert(0, "dd/mm")
         self._recargar_historial()
     
+    def _exportar_csv(self):
+        from tkinter import filedialog
+        import csv
+        ruta = filedialog.asksaveasfilename(defaultextension=".csv",
+                                            filetypes=[("CSV", "*.csv")])
+        if not ruta:
+            return
+        filas = []
+        for item in self.tree_historial.get_children():
+            filas.append(self.tree_historial.item(item)["values"])
+        encabezados = ["ID", "Serie", "Número", "Beneficiario",
+                       "Importe", "Fecha", "Concepto", "Estado"]
+        with open(ruta, "w", newline="", encoding="utf-8-sig") as f:
+            w = csv.writer(f)
+            w.writerow(encabezados)
+            w.writerows(filas)
+
     def _obtener_cheque_seleccionado(self):
         """Obtiene el cheque correspondiente a la selección en el historial."""
         seleccion = self.tree_historial.selection()
@@ -993,6 +1082,10 @@ class AplicacionCheques:
     def _ventana_calibracion(self):
         """Abre ventana interactiva de calibración de impresión."""
         VentanaCalibracion(self.ventana, self.generador_pdf)
+
+    def _ventana_carga_masiva(self):
+        """Abre ventana de carga masiva de cheques."""
+        VentanaCargaMasiva(self.ventana, self.db)
     
     def _abrir_carpeta_pdfs(self):
         """Abre la carpeta donde se guardan los PDFs generados."""
@@ -1026,18 +1119,20 @@ class AplicacionCheques:
             "Desarrollo: 2026"
         )
 
+    def _confirmar_salir(self):
+        if self._tracker.hay_cambios():
+            if not messagebox.askyesno("Confirmar salida",
+                                       "Hay datos sin guardar. ¿Salir de todas formas?"):
+                return
+        self.ventana.destroy()
+
 
 def main():
     """Función principal."""
-    # Instalar tkcalendar si no está disponible
     if not TIENE_TKCALENDAR:
-        print("Instalando tkcalendar para mejor experiencia...")
-        import subprocess
-        try:
-            subprocess.check_call([sys.executable, "-m", "pip", "install", "tkcalendar"])
-            print("✓ tkcalendar instalado correctamente")
-        except:
-            print("Advertencia: No se pudo instalar tkcalendar automáticamente")
+        print("Advertencia: tkcalendar no está instalado.")
+        print("  Para mejor experiencia, instalalo con: pip install tkcalendar")
+        print("  Por ahora se usará el selector de fecha manual.\n")
     
     ventana = tk.Tk()
     app = AplicacionCheques(ventana)

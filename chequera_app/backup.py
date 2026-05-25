@@ -3,6 +3,7 @@ Módulo de backup automático de base de datos.
 """
 
 import os
+import time
 import shutil
 from pathlib import Path
 from datetime import datetime
@@ -27,32 +28,41 @@ class GestorBackup:
         
         # Crear carpeta de backups si no existe
         self.ruta_backups.mkdir(parents=True, exist_ok=True)
+        self._ultimo_backup: float = 0.0
     
-    def crear_backup(self) -> str:
+    def crear_backup(self, interval: int = 0) -> str:
         """
-        Crea un backup de la base de datos.
+        Crea un backup de la base de datos usando la API de backup de SQLite
+        para asegurar consistencia incluso con WAL.
         
         Returns:
             Ruta del backup creado o None si falla
         """
+        ahora = time.time()
+        if interval > 0 and ahora - self._ultimo_backup < interval:
+            return None
+        
         if not self.ruta_bd.exists():
             print(f"Advertencia: Base de datos no encontrada en {self.ruta_bd}")
             return None
         
         try:
-            # Generar nombre con timestamp incluyendo milisegundos para unicidad
+            self._ultimo_backup = ahora
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
             nombre_backup = f"cheques_backup_{timestamp}.db"
             ruta_backup = self.ruta_backups / nombre_backup
             
-            # Usar método seguro para SQLite (copiar archivo cerrado)
-            # Primero verificar que no hay conexiones abiertas
-            self._verificar_bd_cerrada()
+            src_conn = sqlite3.connect(str(self.ruta_bd))
+            try:
+                src_conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                dest_conn = sqlite3.connect(str(ruta_backup))
+                try:
+                    src_conn.backup(dest_conn, pages=-1)
+                finally:
+                    dest_conn.close()
+            finally:
+                src_conn.close()
             
-            # Copiar archivo
-            shutil.copy2(self.ruta_bd, ruta_backup)
-            
-            # Limpiar backups antiguos
             self._limpiar_backups_antiguos()
             
             print(f"Backup creado: {ruta_backup}")
@@ -64,15 +74,6 @@ class GestorBackup:
         except Exception as e:
             print(f"Error inesperado al crear backup: {e}")
             return None
-    
-    def _verificar_bd_cerrada(self):
-        """Verifica que la base de datos no esté bloqueada."""
-        try:
-            conn = sqlite3.connect(self.ruta_bd)
-            conn.close()
-        except sqlite3.OperationalError as e:
-            if "database is locked" in str(e):
-                print("Advertencia: Base de datos bloqueada, intentando backup de todas formas...")
     
     def _limpiar_backups_antiguos(self):
         """Elimina los backups más antiguos si exceden el máximo."""

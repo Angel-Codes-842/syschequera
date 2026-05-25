@@ -10,8 +10,5 @@ tkcalendar>=1.6.0,<2.0.0
 # Funciones de Windows (solo Windows)
 pywin32>=305
 
-# Testing (solo desarrollo)
-pytest>=7.4.0,<8.0.0; sys_platform == 'win32'
-
-# Testing
-pytest>=7.0.0,<8.0.0
+# Lectura de Excel (opcional, usa solo CSV si no está)
+openpyxl>=3.1.0,<4.0.0

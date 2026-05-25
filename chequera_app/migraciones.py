@@ -4,6 +4,7 @@ Permite versionar y aplicar cambios al esquema de forma controlada.
 """
 
 import sqlite3
+from contextlib import contextmanager
 from pathlib import Path
 from typing import List, Dict
 import json
@@ -26,28 +27,29 @@ class GestorMigraciones:
         # Crear tabla de versiones si no existe
         self._crear_tabla_versiones()
     
+    @contextmanager
     def _conectar(self) -> sqlite3.Connection:
-        """Retorna una conexión a la base de datos."""
+        """Context manager: retorna una conexión que se cierra automáticamente."""
         conn = sqlite3.connect(self.ruta_bd)
         conn.row_factory = sqlite3.Row
-        return conn
+        try:
+            yield conn
+        finally:
+            conn.close()
     
     def _crear_tabla_versiones(self):
         """Crea la tabla de control de versiones de migraciones."""
-        conn = self._conectar()
-        cursor = conn.cursor()
-        
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS schema_migrations (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                version INTEGER NOT NULL UNIQUE,
-                nombre TEXT NOT NULL,
-                fecha_aplicacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        
-        conn.commit()
-        conn.close()
+        with self._conectar() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS schema_migrations (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    version INTEGER NOT NULL UNIQUE,
+                    nombre TEXT NOT NULL,
+                    fecha_aplicacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            conn.commit()
     
     def obtener_version_actual(self) -> int:
         """
@@ -56,12 +58,10 @@ class GestorMigraciones:
         Returns:
             Número de versión actual (0 si no hay migraciones aplicadas)
         """
-        conn = self._conectar()
-        cursor = conn.cursor()
-        
-        cursor.execute("SELECT MAX(version) FROM schema_migrations")
-        resultado = cursor.fetchone()[0]
-        conn.close()
+        with self._conectar() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT MAX(version) FROM schema_migrations")
+            resultado = cursor.fetchone()[0]
         
         return resultado if resultado else 0
     
@@ -111,29 +111,34 @@ class GestorMigraciones:
             version = int(ruta.stem.split("_")[0])
             nombre = ruta.stem
             
-            # Ejecutar SQL
-            conn = self._conectar()
-            cursor = conn.cursor()
-            
-            # Ejecutar cada statement separado por ;
-            for statement in sql.split(";"):
-                statement = statement.strip()
-                if statement:
-                    cursor.execute(statement)
-            
-            # Registrar migración
-            cursor.execute(
-                "INSERT INTO schema_migrations (version, nombre) VALUES (?, ?)",
-                (version, nombre)
-            )
-            
-            conn.commit()
-            conn.close()
+            # Ejecutar SQL en una transacción
+            with self._conectar() as conn:
+                cursor = conn.cursor()
+                for statement in sql.split(";"):
+                    statement = statement.strip()
+                    if statement:
+                        cursor.execute(statement)
+                
+                cursor.execute(
+                    "INSERT INTO schema_migrations (version, nombre) VALUES (?, ?)",
+                    (version, nombre)
+                )
+                conn.commit()
             
             print(f"[OK] Migracion {version} aplicada: {nombre}")
             return True
 
         except sqlite3.OperationalError as e:
+            if "duplicate column name" in str(e).lower():
+                print(f"[OK] Columna ya existe, migracion {version} omitida")
+                with self._conectar() as conn:
+                    cursor = conn.cursor()
+                    cursor.execute(
+                        "INSERT INTO schema_migrations (version, nombre) VALUES (?, ?)",
+                        (version, nombre)
+                    )
+                    conn.commit()
+                return True
             print(f"[ERROR] Error de base de datos en migracion {ruta_sql}: {e}")
             return False
         except (OSError, IOError) as e:
